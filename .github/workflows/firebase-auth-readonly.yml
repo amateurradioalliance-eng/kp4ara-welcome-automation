@@ -1,0 +1,26 @@
+name: Firebase authentication read-only
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: kp4ara-firebase-readonly
+  cancel-in-progress: false
+jobs:
+  authenticate-read-only:
+    if: github.event.repository.private == false && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout reviewed code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify built-in Node runtime
+        run: node -e "if (Number(process.versions.node.split('.')[0]) < 20) process.exit(1)"
+      - name: Test read-only network guards without credentials
+        run: node --test test_firebase_readonly.cjs
+      - name: Authenticate dedicated identity and GET Firebase state only
+        env:
+          FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON }}
+        run: node firebase_readonly.cjs
