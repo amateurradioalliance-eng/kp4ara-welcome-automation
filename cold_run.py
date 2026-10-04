@@ -21,14 +21,20 @@ def safe_candidate(data,today):
 def worker(root):
     now=D.datetime.now(pipeline.UTC);today=(now-D.timedelta(hours=4)).date()
     private=root/'private';private.mkdir();public=root/'candidate'/'new-pr-hams.json'
+    diagnostic={'stage':'discovery'}
     # Suppress all raw input, exception details, paths and FCC rows from public logs.
     with (private/'processing.log').open('w',encoding='utf8') as log,contextlib.redirect_stdout(log),contextlib.redirect_stderr(log):
         try:
             plan=pipeline.discover(private,now)
+            diagnostic['stage']='reconstruction'
             result=pipeline.run(private,public,plan,today,now)
+            diagnostic.update({'stage':'candidate_validation','records':len(result['items']),'source_through_date':result['meta']['source_through_date'],'window_start':result['meta']['window_start'],'window_end':result['meta']['window_end'],'stale':result['meta']['stale']})
+            (root/'diagnostic.json').write_text(json.dumps(diagnostic))
             safe_candidate(result,today)
             return 0
-        except Exception:
+        except Exception as error:
+            diagnostic['error_type']=type(error).__name__
+            (root/'diagnostic.json').write_text(json.dumps(diagnostic))
             return 1
 
 def main():
@@ -62,6 +68,7 @@ def main():
             import resource
             peak_rss=max(peak_rss,resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss*1024)
         report['download_bytes']=sum(p.stat().st_size for p in (root/'private/downloads').rglob('*.zip'))
+        if (root/'diagnostic.json').exists():report['diagnostic']=json.loads((root/'diagnostic.json').read_text())
         if proc.returncode:raise ValueError('FCC reconstruction failed or invalid')
         public=root/'candidate/new-pr-hams.json';raw=public.read_bytes();data=json.loads(raw)
         today=(D.datetime.now(pipeline.UTC)-D.timedelta(hours=4)).date()
