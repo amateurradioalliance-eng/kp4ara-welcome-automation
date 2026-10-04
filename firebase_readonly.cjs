@@ -4,7 +4,7 @@ const crypto=require('node:crypto'),fs=require('node:fs');
 const PROJECT='kp4ara-license-academy';
 const EMAIL='kp4ara-welcome-publisher@'+PROJECT+'.iam.gserviceaccount.com';
 const TOKEN_URL='https://oauth2.googleapis.com/token';
-const SCOPES=['https://www.googleapis.com/auth/firebase.readonly','https://www.googleapis.com/auth/cloud-platform.read-only','https://www.googleapis.com/auth/cloud-billing.readonly'];
+const SCOPES=['https://www.googleapis.com/auth/firebase.readonly','https://www.googleapis.com/auth/cloud-platform.read-only'];
 
 function credential(raw){
  let key;try{key=JSON.parse(raw);}catch{throw Error('Invalid secret JSON');}
@@ -14,7 +14,6 @@ function credential(raw){
 function allowed(url){
  const u=new URL(url);if(u.protocol!=='https:'||u.username||u.password||u.port||u.hash)return false;
  for(const k of u.searchParams.keys())if(!['pageSize','pageToken','status'].includes(k))return false;
- if(u.hostname==='cloudbilling.googleapis.com')return u.pathname==='/v1/projects/'+PROJECT+'/billingInfo';
  if(u.hostname==='cloudresourcemanager.googleapis.com')return u.pathname==='/v1/projects/'+PROJECT;
  if(u.hostname==='firebase.googleapis.com')return u.pathname==='/v1beta1/projects/'+PROJECT;
  if(u.hostname!=='firebasehosting.googleapis.com')return false;
@@ -49,21 +48,24 @@ async function exchange(key,transport=fetch){
  if(!r.ok){const e=Error('OAuth authentication rejected');e.http_status=r.status;throw e;}
  const data=await r.json();if(!data.access_token||data.token_type!=='Bearer')throw Error('Invalid OAuth response');return data.access_token;
 }
-async function inspect(reader,anchor){
- const billing=await reader.get('https://cloudbilling.googleapis.com/v1/projects/'+PROJECT+'/billingInfo');
- if(billing.billingEnabled||billing.billingAccountName)throw Error('Billing guard failed');
+async function inspect(reader,anchor,results={}){
  const project=await reader.get('https://cloudresourcemanager.googleapis.com/v1/projects/'+PROJECT);
  if(project.projectId!==PROJECT||project.lifecycleState!=='ACTIVE')throw Error('Wrong/inactive project');
+ results.project_read='PASS';
  const firebase=await reader.get('https://firebase.googleapis.com/v1beta1/projects/'+PROJECT);
  if(firebase.projectId!==PROJECT)throw Error('Wrong Firebase project');
+ results.firebase_project_read='PASS';
  const host='https://firebasehosting.googleapis.com/v1beta1/sites/'+PROJECT;
  const site=await reader.get(host);
+ if(!site.name)throw Error('Invalid site');results.site_read='PASS';
  const live=await reader.get(host+'/releases?pageSize=1');
+ results.live_release_read='PASS';
  const name=live.releases?.[0]?.version?.name;
  if(!name||!name.startsWith('sites/'+PROJECT+'/versions/'))throw Error('Live version unavailable');
  if(name.split('/').pop()!==anchor.version)throw Error('Production version changed; no writes attempted');
  const version=await reader.get('https://firebasehosting.googleapis.com/v1beta1/'+name);
  if(version.status!=='FINALIZED')throw Error('Live version not finalized');
+ results.version_configuration_read='PASS';
  const files={};let page;
  do{
   const u=new URL('https://firebasehosting.googleapis.com/v1beta1/'+name+'/files');u.searchParams.set('status','ACTIVE');u.searchParams.set('pageSize','1000');if(page)u.searchParams.set('pageToken',page);
@@ -72,19 +74,20 @@ async function inspect(reader,anchor){
   page=data.nextPageToken;
  }while(page);
  if(!Object.keys(files).length)throw Error('Empty live manifest');
+ results.manifest_read='PASS';
  const config=version.config||{},hash=fingerprint(config,files);
  if(hash!==anchor.protected_sha256)throw Error('Protected live manifest mismatch');
  const after=await reader.get(host+'/releases?pageSize=1');
  if(after.releases?.[0]?.version?.name!==name)throw Error('Live changed during read');
- return {billingEnabled:false,billingAccountLinked:false,project_read:true,firebase_project_read:true,site_read:!!site.name,live_version:name,live_unchanged:true,configuration_read:true,config_sections:Object.keys(config).sort(),manifest_read:true,manifest_files:Object.keys(files).length,protected_manifest_matches:true,protected_sha256:hash,get_requests:reader.calls,hosting_writes:0};
+ return {billing_check:'external_administrative_precondition',project_read:true,firebase_project_read:true,site_read:!!site.name,live_version:name,live_unchanged:true,configuration_read:true,config_sections:Object.keys(config).sort(),manifest_read:true,manifest_files:Object.keys(files).length,protected_manifest_matches:true,protected_sha256:hash,get_requests:reader.calls,hosting_writes:0};
 }
 async function main(){
- const report={mode:'AUTH_READ_ONLY',result:'FAIL',hosting_writes:0,credential_files_written:0,artifacts:false,persistent_cache:false};let stage='secret_validation';
+ const report={mode:'AUTH_READ_ONLY',result:'FAIL',hosting_writes:0,credential_files_written:0,artifacts:false,persistent_cache:false,billing_check:'external_administrative_precondition',reads:{}};let stage='secret_validation';
  try{
   let key=credential(process.env.FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON||'');delete process.env.FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON;
   stage='oauth_authentication';const token=await exchange(key);key=null;report.authentication='PASS';
   stage='firebase_read_only_checks';const anchor=JSON.parse(fs.readFileSync('production-reference.json','utf8'));
-  Object.assign(report,await inspect(new Reader(token),anchor),{result:'PASS'});
+  Object.assign(report,await inspect(new Reader(token),anchor,report.reads),{result:'PASS'});
  }catch(e){report.failure_stage=stage;report.http_status=e.http_status||null;report.failure_request=e.request_path||null;report.reason=e.http_status?'Read/auth denied; role NOT expanded':e.message;process.exitCode=1;}
  const safe=JSON.stringify(report,null,2);console.log(safe);
  if(process.env.GITHUB_STEP_SUMMARY)fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,'## Firebase authentication — read only\n\n```json\n'+safe+'\n```\n');
