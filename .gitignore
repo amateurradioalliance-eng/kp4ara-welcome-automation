@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.sqlite*
+*.db
+*.zip
+*.download
+*.pending
+.env*
+*credential*
+*service-account*
+private/
+scratch/
+downloads/
+new-pr-hams.json
+audit.json
+current.json
+filtered-private.json
