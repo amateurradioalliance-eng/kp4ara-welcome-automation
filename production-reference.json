@@ -1,11 +1,13 @@
 {
   "project": "kp4ara-license-academy",
   "site": "kp4ara-license-academy",
-  "version": "d3037a3f41e39ec2",
+  "version": "adcfcc2c9dae26fe",
   "protected_sha256": "e467e94874729e83b93e43f0fe7ab4e89a0de909623f68c7b247649c3133387a",
   "manifest_files": 31,
   "welcome_initially_published": true,
-  "publication_enabled": false,
+  "publication_enabled": true,
   "manual_json_only_authorized": true,
-  "weekly_schedule_enabled": false
+  "weekly_schedule_enabled": true,
+  "reference_mode": "live-version-with-immutable-protected-fingerprint",
+  "billing_precondition": "Spark/no linked billing; external administrative audit; disable workflow before any plan/billing change"
 }
