@@ -53,3 +53,7 @@ test('unexpected live version aborts',async()=>{
 test('changed protected file rejected',async()=>{
  const f=fakeReader({corrupt:true});await assert.rejects(()=>inspect(f.reader,f.anchor));assert(f.calls.every(x=>x.method==='GET'));
 });
+
+test('site GET uses documented project route and rejects obsolete site GET',async()=>{
+ const good='https://firebasehosting.googleapis.com/v1beta1/projects/kp4ara-license-academy/sites/kp4ara-license-academy';assert(allowed(good));assert(!allowed('https://firebasehosting.googleapis.com/v1beta1/sites/kp4ara-license-academy'));const f=fakeReader();await inspect(f.reader,f.anchor);assert.equal(f.calls[2].url,good);
+});

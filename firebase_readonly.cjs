@@ -18,7 +18,7 @@ function allowed(url){
  if(u.hostname==='firebase.googleapis.com')return u.pathname==='/v1beta1/projects/'+PROJECT;
  if(u.hostname!=='firebasehosting.googleapis.com')return false;
  const root='/v1beta1/sites/'+PROJECT;
- return u.pathname===root||u.pathname===root+'/releases'||new RegExp('^'+root+'/versions/[a-zA-Z0-9_-]+(?:/files)?$').test(u.pathname);
+ return u.pathname==='/v1beta1/projects/'+PROJECT+'/sites/'+PROJECT||u.pathname===root+'/releases'||new RegExp('^'+root+'/versions/[a-zA-Z0-9_-]+(?:/files)?$').test(u.pathname);
 }
 class Reader{
  constructor(token,transport=fetch){this.token=token;this.transport=transport;this.calls=0;}
@@ -56,7 +56,7 @@ async function inspect(reader,anchor,results={}){
  if(firebase.projectId!==PROJECT)throw Error('Wrong Firebase project');
  results.firebase_project_read='PASS';
  const host='https://firebasehosting.googleapis.com/v1beta1/sites/'+PROJECT;
- const site=await reader.get(host);
+ const site=await reader.get('https://firebasehosting.googleapis.com/v1beta1/projects/'+PROJECT+'/sites/'+PROJECT);
  if(!site.name)throw Error('Invalid site');results.site_read='PASS';
  const live=await reader.get(host+'/releases?pageSize=1');
  results.live_release_read='PASS';
