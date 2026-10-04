@@ -1,0 +1,117 @@
+name: Welcome manual JSON-only update
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: kp4ara-hosting-publication
+  cancel-in-progress: false
+jobs:
+  manual-json-only:
+    if: github.event.repository.private == false && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PYTHONUNBUFFERED: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      PIP_NO_CACHE_DIR: '1'
+    steps:
+      - name: Checkout automation code only
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Tests for validated FCC pipeline
+        run: python3 -m unittest discover -s . -p 'test_*.py' -v
+      - name: Prepare guarded JSON-only client and test it without credentials
+        run: |
+          cat > "$RUNNER_TEMP/json_only_client.cjs" <<'CLIENT'
+          'use strict';
+          const crypto=require('node:crypto'),fs=require('node:fs'),zlib=require('node:zlib'),path=require('node:path');
+          const P='kp4ara-license-academy',ROOT='https://firebasehosting.googleapis.com/v1beta1/sites/'+P,FILE='/new-pr-hams.json';
+          const canonical=x=>Array.isArray(x)?x.map(canonical):x&&typeof x==='object'?Object.fromEntries(Object.keys(x).sort().map(k=>[k,canonical(x[k])])):x;
+          const equal=(a,b)=>JSON.stringify(canonical(a))===JSON.stringify(canonical(b)),sha=x=>crypto.createHash('sha256').update(x).digest('hex');
+          const fingerprint=(config,files)=>sha(JSON.stringify(canonical({config,files:Object.fromEntries(Object.entries(files).filter(([p])=>p!==FILE))})));
+          function check(anchor,state){if(state.version!==anchor.version||Object.keys(state.files).length!==31||!state.files[FILE]||fingerprint(state.config,state.files)!==anchor.protected_sha256)throw Error('Production concurrency/protected guard');}
+          function candidateGuard(data){const meta=['last_updated','source_through_date','generated_at','window_start','window_end','stale','source'];if(!equal(Object.keys(data).sort(),['items','meta'])||!Array.isArray(data.items)||typeof data.meta!=='object'||data.meta.stale!==false||Object.keys(data.meta).some(k=>!meta.includes(k)))throw Error('Candidate schema');const calls=new Set();for(const item of data.items){if(!equal(Object.keys(item).sort(),['callsign','grant_date','license_class','name'])||Object.values(item).some(v=>typeof v!=='string')||calls.has(item.callsign))throw Error('Private/duplicate/invalid candidate');calls.add(item.callsign);}}
+          async function publish(api,anchor,before,raw){check(anchor,before);const current=await api.live();check(anchor,current);if(!equal(current,before))throw Error('Changed since first read');candidateGuard(JSON.parse(raw));const old=await api.publicJson();if(raw.equals(old))return {result:'NO-OP PASS',before:before.version,after:before.version,hosting_writes:0};const compressed=zlib.gzipSync(raw,{level:9,mtime:0}),hash=sha(compressed),files={...before.files,[FILE]:hash};if(fingerprint(before.config,files)!==anchor.protected_sha256)throw Error('Protected mutation');const pre=await api.live();check(anchor,pre);if(!equal(pre,before))throw Error('Concurrent change before create');const version=await api.create(before.config);const uploaded=await api.populate(version,files);if(uploaded.hashes.some(h=>h!==hash))throw Error('Unexpected upload');if(uploaded.hashes.includes(hash))await api.upload(version,hash,compressed,uploaded.url);await api.finalize(version);const prepared=await api.snapshot(version);if(!equal(prepared.files,files)||!equal(prepared.config,before.config)||prepared.status!=='FINALIZED')throw Error('Prepared manifest mismatch');const last=await api.live();check(anchor,last);if(!equal(last,before))throw Error('Concurrent change before release');let active=false;try{await api.release(version);active=true;const live=await api.live();if(live.version!==version||!equal(live.files,files)||!equal(live.config,before.config)||!raw.equals(await api.publicJson(version)))throw Error('Postpublication mismatch');return {result:'PUBLISH PASS',before:before.version,after:version,manifest_files:31,protected_files_identical:30,config_identical:true,json_byte_identical:true,public_sha256:sha(raw)};}catch(e){const live=await api.live();if(active||live.version===version){if(live.version!==version)throw Error('Concurrent live change; cannot overwrite');await api.release(before.version);const restored=await api.live();if(!equal(restored,before))throw Error('Rollback verification failed');console.log('ROLLBACK VERIFIED '+before.version);}throw e;}}
+          async function auth(){let key=JSON.parse(process.env.FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON||'null');delete process.env.FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON;if(key?.client_email!=='kp4ara-welcome-publisher@'+P+'.iam.gserviceaccount.com'||key.project_id!==P)throw Error('Dedicated identity guard');const now=Math.floor(Date.now()/1000),b64=x=>Buffer.from(JSON.stringify(x)).toString('base64url'),unsigned=b64({alg:'RS256',typ:'JWT'})+'.'+b64({iss:key.client_email,scope:'https://www.googleapis.com/auth/firebase',aud:'https://oauth2.googleapis.com/token',iat:now,exp:now+600}),assertion=unsigned+'.'+crypto.sign('RSA-SHA256',Buffer.from(unsigned),key.private_key).toString('base64url');key=null;const r=await fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'urn:ietf:params:oauth:grant-type:jwt-bearer',assertion}),redirect:'error',signal:AbortSignal.timeout(45000)});if(!r.ok)throw Error('OAuth HTTP '+r.status);const token=(await r.json()).access_token;if(!token)throw Error('OAuth missing token');return token;}
+          class API{constructor(token){this.token=token;this.operations=[];this.writes=0;}async req(method,url,body){const u=new URL(url);if(u.protocol!=='https:'||u.hostname!=='firebasehosting.googleapis.com'||!u.pathname.startsWith('/v1beta1/sites/'+P+'/'))throw Error('REST guard');const r=await fetch(url,{method,headers:{Authorization:'Bearer '+this.token,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{}),redirect:'error',signal:AbortSignal.timeout(60000)});this.operations.push({method,path:u.pathname,status:r.status});if(method!=='GET')this.writes++;if(!r.ok)throw Error(method+' '+u.pathname+' HTTP '+r.status);return r.json();}async snapshot(id){const v=await this.req('GET',ROOT+'/versions/'+id);let files={},next;do{const p=await this.req('GET',ROOT+'/versions/'+id+'/files?pageSize=1000'+(next?'&pageToken='+encodeURIComponent(next):''));for(const f of p.files||[]){if(files[f.path])throw Error('Duplicate manifest');files[f.path]=f.hash;}next=p.nextPageToken;}while(next);return {version:id,config:v.config||{},files,status:v.status};}async live(){const r=await this.req('GET',ROOT+'/releases?pageSize=1'),id=r.releases?.[0]?.version?.name?.split('/').pop();if(!id)throw Error('Live missing');const state=await this.snapshot(id);const again=await this.req('GET',ROOT+'/releases?pageSize=1');if(again.releases?.[0]?.version?.name?.split('/').pop()!==id)throw Error('Live read race');return state;}async publicJson(id='read'){const r=await fetch('https://'+P+'.web.app'+FILE+'?json_only_verify='+id,{redirect:'error',signal:AbortSignal.timeout(60000)});if(!r.ok)throw Error('Public JSON HTTP '+r.status);return Buffer.from(await r.arrayBuffer());}async create(config){return (await this.req('POST',ROOT+'/versions',{config})).name.split('/').pop();}async populate(id,files){const p=await this.req('POST',ROOT+'/versions/'+id+':populateFiles',{files});return {hashes:p.uploadRequiredHashes||[],url:p.uploadUrl};}async upload(id,h,bytes,base){const u=new URL(base+'/'+h);if(u.protocol!=='https:'||u.hostname!=='upload-firebasehosting.googleapis.com'||u.pathname!=='/upload/sites/'+P+'/versions/'+id+'/files/'+h)throw Error('Upload guard');const r=await fetch(u,{method:'POST',headers:{Authorization:'Bearer '+this.token,'Content-Type':'application/octet-stream'},body:bytes,redirect:'error',signal:AbortSignal.timeout(60000)});this.writes++;this.operations.push({method:'POST',path:u.pathname,status:r.status});if(!r.ok)throw Error('Upload HTTP '+r.status);}finalize(id){return this.req('PATCH',ROOT+'/versions/'+id+'?updateMask=status',{status:'FINALIZED'});}release(id){return this.req('POST',ROOT+'/releases?versionName='+encodeURIComponent('sites/'+P+'/versions/'+id),{message:'Controlled manual Welcome JSON-only update'});}}
+          async function main(){const anchor=JSON.parse(fs.readFileSync('production-reference.json','utf8'));if(anchor.version!=='d3037a3f41e39ec2'||anchor.protected_sha256!=='e467e94874729e83b93e43f0fe7ab4e89a0de909623f68c7b247649c3133387a')throw Error('Unapproved anchor');const api=new API(await auth()),beforeFile=path.join(process.env.RUNNER_TEMP,'kp4ara-json-only-before.json');let report;if(process.env.JSON_ONLY_PHASE==='preflight'){const state=await api.live();check(anchor,state);fs.writeFileSync(beforeFile,JSON.stringify(state));report={result:'PREFLIGHT PASS',version:state.version,manifest_files:31,protected_sha256:fingerprint(state.config,state.files),hosting_writes:0};}else if(process.env.JSON_ONLY_PHASE==='publish'){const before=JSON.parse(fs.readFileSync(beforeFile,'utf8')),raw=fs.readFileSync(path.join(process.env.RUNNER_TEMP,'kp4ara-json-only-public.json'));const feed=JSON.parse(raw);report=await publish(api,anchor,before,raw);Object.assign(report,{records:feed.items.length,classes:Object.fromEntries([...new Set(feed.items.map(x=>x.license_class))].sort().map(c=>[c,feed.items.filter(x=>x.license_class===c).length])),source_through_date:feed.meta.source_through_date,last_updated:feed.meta.last_updated,stale:feed.meta.stale,hosting_writes:api.writes,operations:api.operations});}else throw Error('Phase guard');const safe=JSON.stringify(report,null,2);console.log(safe);if(process.env.GITHUB_STEP_SUMMARY)fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,'## Hosting JSON-only\n\n```json\n'+safe+'\n```\n');}
+          module.exports={check,candidateGuard,publish,fingerprint,API};if(require.main===module)main().catch(e=>{console.error(e.message);process.exitCode=1});
+          CLIENT
+          cat > "$RUNNER_TEMP/test_json_only_client.cjs" <<'TEST'
+          const test=require('node:test'),assert=require('node:assert/strict'),{publish,fingerprint}=require(process.env.JSON_ONLY_CLIENT);const files=Object.fromEntries(Array.from({length:30},(_,n)=>['/protected-'+n,'synthetic-'+n]));files['/new-pr-hams.json']='old-json';const config={rewrites:[{glob:'**',path:'/index.html'}]},anchor={version:'d3037a3f41e39ec2',protected_sha256:fingerprint(config,files)},before={version:anchor.version,config,files,status:'FINALIZED'},raw=Buffer.from(JSON.stringify({items:[{callsign:'WP4TEST',name:'Synthetic fixture',license_class:'Technician',grant_date:'2026-10-02'}],meta:{stale:false}}));
+          function mock(mode){let current=structuredClone(before),prepared=null,calls=[],old=Buffer.from('different');const api={calls,live:async()=>{if(mode==='conflict')return {...current,version:'other'};return structuredClone(current);},publicJson:async id=>mode==='noop'?raw:id&&mode==='postfail'?Buffer.from('BAD'):id?raw:old,create:async c=>{calls.push('create');prepared={version:'new',config:c,status:'CREATED'};return 'new';},populate:async(id,f)=>{calls.push('populate');prepared.files=f;return {hashes:mode==='extra-upload'?['BAD']:[],url:''};},upload:async()=>calls.push('upload'),finalize:async()=>{calls.push('finalize');prepared.status='FINALIZED';},snapshot:async()=>mode==='bad-manifest'?{...prepared,files:{}}:prepared,release:async id=>{calls.push('release '+id);current=id===anchor.version?structuredClone(before):structuredClone(prepared);}};return api;}
+          test('NO-OP creates no version or release',async()=>{const api=mock('noop');assert.equal((await publish(api,anchor,before,raw)).result,'NO-OP PASS');assert.deepEqual(api.calls,[]);});
+          test('only JSON hash changes; other 30 preserved',async()=>{const api=mock('normal');const result=await publish(api,anchor,before,raw);assert.equal(result.result,'PUBLISH PASS');const live=await api.live();assert.equal(Object.keys(live.files).length,31);for(const p of Object.keys(files))if(p!=='/new-pr-hams.json')assert.equal(live.files[p],files[p]);assert.deepEqual(live.config,config);});
+          for(const mode of ['conflict','extra-upload','bad-manifest'])test(mode+' aborts without activating release',async()=>{const api=mock(mode);await assert.rejects(()=>publish(api,anchor,before,raw));assert.equal(api.calls.filter(x=>x.startsWith('release')).length,0);});
+          test('post-publication failure rolls back verified baseline',async()=>{const api=mock('postfail');await assert.rejects(()=>publish(api,anchor,before,raw));assert.deepEqual(await api.live(),before);assert.deepEqual(api.calls.slice(-2),['release new','release '+anchor.version]);});
+          test('private field rejected before writes',async()=>{const api=mock('normal');const f=JSON.parse(raw);f.items[0].frn='FORBIDDEN';await assert.rejects(()=>publish(api,anchor,before,Buffer.from(JSON.stringify(f))));assert.deepEqual(api.calls,[]);});
+          TEST
+          JSON_ONLY_CLIENT="$RUNNER_TEMP/json_only_client.cjs" node --test "$RUNNER_TEMP/test_json_only_client.cjs"
+      - name: Read approved live manifest before FCC processing
+        env:
+          FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON }}
+          JSON_ONLY_PHASE: preflight
+        run: node "$RUNNER_TEMP/json_only_client.cjs"
+      - name: Reconstruct FCC from zero and erase all private scratch data
+        run: |
+          python3 <<'PYTHON'
+          import datetime as D,hashlib,json,os,platform,resource,shutil,subprocess,sys,time,uuid
+          from pathlib import Path
+          from cold_run import file_bytes,safe_candidate
+          from publisher import validate
+          from freshness import assess
+          base=Path(os.environ['RUNNER_TEMP']).resolve();checkout=Path.cwd().resolve();assert base!=checkout and checkout not in base.parents
+          root=base/('kp4ara-json-only-'+uuid.uuid4().hex);root.mkdir();start=time.perf_counter();peak_disk=peak_rss=0;proc=None
+          report={'mode':'FCC_FROM_ZERO','result':'FAIL','artifacts':False,'cache':False,'private_persistent_bytes':0,'platform':platform.platform()}
+          try:
+           if shutil.disk_usage(base).free<8*1024**3:raise ValueError('Disk guard')
+           proc=subprocess.Popen([sys.executable,'cold_run.py','--worker',str(root)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+           while proc.poll() is None:
+            peak_disk=max(peak_disk,file_bytes(root))
+            try:
+             for line in (Path('/proc')/str(proc.pid)/'status').read_text().splitlines():
+              if line.startswith(('VmRSS:','VmHWM:')):peak_rss=max(peak_rss,int(line.split()[1])*1024)
+            except OSError:pass
+            if time.perf_counter()-start>6600 or peak_disk>12*1024**3:raise ValueError('Resource guard')
+            time.sleep(.5)
+           diagnostic=json.loads((root/'diagnostic.json').read_text());report['diagnostic']=diagnostic
+           if proc.returncode:raise ValueError('FCC failure; last live JSON preserved')
+           now=D.datetime.now(D.timezone.utc);today=(now-D.timedelta(hours=4)).date();raw=(root/'candidate/new-pr-hams.json').read_bytes();data=json.loads(raw);validate(data,today,now)
+           report.update(safe_candidate(data,today,now));report['freshness']=assess(data['meta']['source_through_date'],today,now);report['last_updated']=data['meta']['last_updated'];report['public_json_bytes']=len(raw);report['public_sha256']=hashlib.sha256(raw).hexdigest();report['download_bytes']=sum(p.stat().st_size for p in (root/'private/downloads').rglob('*.zip'));report['result']='PASS'
+           (base/'kp4ara-json-only-public.json').write_bytes(raw)
+          finally:
+           if proc and proc.poll() is None:proc.terminate();proc.wait(timeout=30)
+           report.update(duration_seconds=round(time.perf_counter()-start,3),peak_worker_rss_bytes=max(peak_rss,resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss*1024),peak_scratch_bytes_sampled_500ms=peak_disk)
+           assert root.parent==base and root.name.startswith('kp4ara-json-only-');shutil.rmtree(root);report['private_scratch_removed']=not root.exists();safe=json.dumps(report,indent=2);print(safe);Path(os.environ['GITHUB_STEP_SUMMARY']).open('a').write('## FCC reconstruction\n\n```json\n'+safe+'\n```\n')
+          if report['result']!='PASS':sys.exit(1)
+          PYTHON
+      - name: Validate real candidate immediately before publication
+        run: |
+          python3 <<'PYTHON'
+          import json,datetime as D,os
+          from pathlib import Path
+          from publisher import validate
+          now=D.datetime.now(D.timezone.utc);today=(now-D.timedelta(hours=4)).date()
+          validate(json.loads((Path(os.environ['RUNNER_TEMP'])/'kp4ara-json-only-public.json').read_text()),today,now)
+          print('Candidate FCC schema/privacy/current-window/freshness PASS')
+          PYTHON
+      - name: Publish only JSON if changed, with concurrency checks and rollback
+        env:
+          FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON }}
+          JSON_ONLY_PHASE: publish
+        run: node "$RUNNER_TEMP/json_only_client.cjs"
+      - name: Remove temporary public files; no artifacts or cache
+        if: always()
+        run: |
+          python3 <<'PYTHON'
+          import os
+          from pathlib import Path
+          base=Path(os.environ['RUNNER_TEMP']).resolve()
+          for name in ('kp4ara-json-only-before.json','kp4ara-json-only-public.json','json_only_client.cjs','test_json_only_client.cjs'):
+              target=base/name
+              assert target.parent==base
+              target.unlink(missing_ok=True)
+          print('Temporary public files removed; no credential files created')
+          PYTHON
