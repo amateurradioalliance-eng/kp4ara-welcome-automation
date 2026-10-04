@@ -1,8 +1,11 @@
 {
   "project": "kp4ara-license-academy",
   "site": "kp4ara-license-academy",
-  "version": "5139c599db2114af",
-  "protected_sha256": "f302b1809ba8dc9f4c4a9e641f14e89a4dd0d061894ede53257d9e812e701271",
-  "welcome_initially_published": false,
-  "publication_enabled": false
+  "version": "d3037a3f41e39ec2",
+  "protected_sha256": "e467e94874729e83b93e43f0fe7ab4e89a0de909623f68c7b247649c3133387a",
+  "manifest_files": 31,
+  "welcome_initially_published": true,
+  "publication_enabled": false,
+  "manual_json_only_authorized": true,
+  "weekly_schedule_enabled": false
 }
