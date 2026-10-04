@@ -8,6 +8,11 @@ __pycache__/
 .env*
 *credential*
 *service-account*
+*service_account*
+*-key.json
+kp4ara-license-academy-*.json
+*.pem
+*.p12
 private/
 scratch/
 downloads/

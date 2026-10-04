@@ -1,1 +1,2 @@
 # No third-party Python dependencies. Standard library only. Python >= 3.11.
+# Firebase read-only workflow: Node >=20 built-in crypto/fs/fetch only; no npm packages.
