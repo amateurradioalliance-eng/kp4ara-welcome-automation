@@ -1,0 +1,32 @@
+name: FCC cold dry-run
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kp4ara-fcc-dry-run
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    if: github.event.repository.private == false && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PYTHONUNBUFFERED: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      PIP_NO_CACHE_DIR: '1'
+    steps:
+      - name: Checkout code only
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify standard-library runtime
+        run: python3 -c "import sys; assert sys.version_info >= (3,11); print(sys.version.split()[0])"
+      - name: Synthetic unit tests
+        run: python3 -m unittest discover -s . -p 'test_*.py' -v
+      - name: Live FCC cold reconstruction without publication
+        run: python3 cold_run.py
