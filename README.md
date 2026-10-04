@@ -16,7 +16,15 @@ The candidate is temporary, not committed or uploaded as an artifact.
 Cold rebuild discovers snapshot/delta coverage from FCC embedded manifests, validates schema/counts/CRC,
 uses initial NE / granted G / APGRT / individual PR active Amateur with available prior-history controls,
 and includes direct initial General/Extra. Both boundaries of today PR minus 30 days through today are included.
-Coverage must reach yesterday PR; stale, corrupt or incomplete input fails the job with no publication.
+Coverage is assessed by freshness.py: the last national federal business day whose
+following-calendar-day noon Puerto Rico availability deadline has passed. No overdue
+business day may be missing; absolute coverage age cannot exceed four calendar days.
+This is our conservative policy, not an FCC SLA. Weekend/holiday exports are still
+processed when available, using actual dated manifests and contiguous coverage.
+No source date is advanced because a day was nonbusiness. Stale, corrupt or incomplete
+input fails the job without publication; the accepted private base/timestamp survive.
+Calendar is reviewed for 2026-2030; unexpected shutdowns/closures do not expand tolerance.
+See COVERAGE-POLICY.md for primary sources, limits and metadata semantics.
 Do not force the record count to 39: the real rolling window changes over time.
 
 ## Publisher status

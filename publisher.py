@@ -1,16 +1,17 @@
 """Transport-injected model. No real HTTP adapter or credential handling in this evaluation."""
 import datetime as D, gzip, hashlib, json
+from freshness import assess
 PATH='/new-pr-hams.json'
 META={'last_updated','source_through_date','generated_at','window_start','window_end','stale','source'}
 def fingerprint(config,files):
     protected={k:v for k,v in files.items() if k!=PATH}
     encoded=json.dumps({'config':config,'files':protected},sort_keys=True,separators=(',',':')).encode()
     return hashlib.sha256(encoded).hexdigest()
-def validate(data,today):
+def validate(data,today,now=None):
     if set(data)!={'items','meta'} or not isinstance(data['items'],list):raise ValueError('Invalid root')
     meta=data['meta']
     if not isinstance(meta,dict) or set(meta)-META or meta.get('stale') is not False:raise ValueError('Invalid/stale metadata')
-    if D.date.fromisoformat(meta['source_through_date'])<today-D.timedelta(days=1):raise ValueError('Coverage incomplete')
+    if assess(meta['source_through_date'],today,now)['stale']:raise ValueError('Coverage incomplete')
     if meta.get('window_end')!=today.isoformat() or meta.get('window_start')!=(today-D.timedelta(days=30)).isoformat():raise ValueError('Wrong window')
     calls=set()
     for item in data['items']:
@@ -21,8 +22,8 @@ def validate(data,today):
         calls.add(item['callsign'])
         if not today-D.timedelta(days=30)<=D.date.fromisoformat(item['grant_date'])<=today:raise ValueError('Expired/future')
     return json.dumps(data,ensure_ascii=False,separators=(',',':')).encode()
-def publish(api,anchor,data,today):
-    raw=validate(data,today)
+def publish(api,anchor,data,today,now=None):
+    raw=validate(data,today,now)
     if api.billing_enabled():raise ValueError('Billing must remain disabled')
     before=api.live()
     if before['version']!=anchor['version']:raise ValueError('Unexpected production version')

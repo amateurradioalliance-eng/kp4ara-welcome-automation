@@ -3,6 +3,7 @@ import argparse,contextlib,datetime as D,hashlib,json,os,platform,shutil,subproc
 from pathlib import Path
 import pipeline
 from publisher import validate
+from freshness import assess
 
 def file_bytes(root):
     total=0
@@ -12,8 +13,8 @@ def file_bytes(root):
             except FileNotFoundError:pass
     return total
 
-def safe_candidate(data,today):
-    validate(data,today)
+def safe_candidate(data,today,now=None):
+    validate(data,today,now)
     classes={c:sum(x['license_class']==c for x in data['items']) for c in sorted({x['license_class'] for x in data['items']})}
     return {'records':len(data['items']),'classes':classes,'source_through_date':data['meta']['source_through_date'],
             'window_start':data['meta']['window_start'],'window_end':data['meta']['window_end'],'stale':data['meta']['stale']}
@@ -30,7 +31,10 @@ def worker(root):
             result=pipeline.run(private,public,plan,today,now)
             diagnostic.update({'stage':'candidate_validation','records':len(result['items']),'source_through_date':result['meta']['source_through_date'],'window_start':result['meta']['window_start'],'window_end':result['meta']['window_end'],'stale':result['meta']['stale']})
             (root/'diagnostic.json').write_text(json.dumps(diagnostic))
-            safe_candidate(result,today)
+            diagnostic['freshness']=assess(result['meta']['source_through_date'],today,now)
+            diagnostic['public_json_bytes']=public.stat().st_size
+            safe_candidate(result,today,now)
+            (root/'diagnostic.json').write_text(json.dumps(diagnostic))
             return 0
         except Exception as error:
             diagnostic['error_type']=type(error).__name__
@@ -68,11 +72,13 @@ def main():
             import resource
             peak_rss=max(peak_rss,resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss*1024)
         report['download_bytes']=sum(p.stat().st_size for p in (root/'private/downloads').rglob('*.zip'))
-        if (root/'diagnostic.json').exists():report['diagnostic']=json.loads((root/'diagnostic.json').read_text())
+        if (root/'diagnostic.json').exists():
+            report['diagnostic']=json.loads((root/'diagnostic.json').read_text())
+            if report['diagnostic']['stage']=='candidate_validation':report['fcc_access']='CONFIRMED'
         if proc.returncode:raise ValueError('FCC reconstruction failed or invalid')
         public=root/'candidate/new-pr-hams.json';raw=public.read_bytes();data=json.loads(raw)
         today=(D.datetime.now(pipeline.UTC)-D.timedelta(hours=4)).date()
-        report.update(safe_candidate(data,today));report.update({'result':'PASS','fcc_access':'CONFIRMED','public_json_bytes':len(raw),'public_json_sha256':hashlib.sha256(raw).hexdigest(),'private_fields_in_candidate':False})
+        report.update(safe_candidate(data,today,D.datetime.now(pipeline.UTC)));report.update({'result':'PASS','fcc_access':'CONFIRMED','public_json_bytes':len(raw),'public_json_sha256':hashlib.sha256(raw).hexdigest(),'private_fields_in_candidate':False})
     except Exception:
         report['result']='FAIL'
     finally:

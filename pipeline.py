@@ -16,6 +16,7 @@ import urllib.request
 import zipfile
 from functools import lru_cache
 from pathlib import Path
+from freshness import assess
 
 UTC=D.timezone.utc
 BASE='https://data.fcc.gov/download/pub/uls/'
@@ -183,7 +184,7 @@ def extract(db,today):
 
 def payload(items,meta,today,now,failed=False):
     through=min(meta['a_through'],meta['l_through'])
-    stale=failed or D.date.fromisoformat(through)<today-D.timedelta(days=1)
+    stale=failed or assess(through,today,now)['stale']
     return {'items':items,'meta':{'last_updated':meta.get('last_updated'),'source_through_date':through,'generated_at':now.isoformat(),'window_start':(today-D.timedelta(days=30)).isoformat(),'window_end':today.isoformat(),'stale':stale,'source':'FCC Universal Licensing System (ULS)'}}
 
 def last_public(path,today,now):
@@ -235,6 +236,8 @@ def run(cache,public,archives,today,now):
                 db.execute('CREATE INDEX ad_file ON ad(k,file)')
             m=metadata(db)
             if not {'a_through','l_through'}.issubset(m):raise SourceError('Both source baselines required')
+            if assess(min(m['a_through'],m['l_through']),today,now)['stale']:
+                raise SourceError('Coverage outside conservative publication policy')
             setmeta(db,'last_updated',now.isoformat());m=metadata(db)
             items,audit=extract(db,today)
         db.close()
