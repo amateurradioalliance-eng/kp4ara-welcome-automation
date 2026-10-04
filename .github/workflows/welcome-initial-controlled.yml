@@ -1,0 +1,55 @@
+name: Welcome initial controlled publication
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [publish, rollback]
+        default: publish
+        required: true
+      expected_live:
+        type: string
+        default: '5139c599db2114af'
+        required: true
+      candidate:
+        description: Approved immutable public candidate, base64
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: kp4ara-hosting-publication
+  cancel-in-progress: false
+jobs:
+  controlled-initial-publication:
+    if: github.event.repository.private == false && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Publish exact approved candidate or restore approved baseline
+        env:
+          FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON }}
+          CANDIDATE: ${{ inputs.candidate }}
+          OPERATION: ${{ inputs.operation }}
+          EXPECTED_LIVE: ${{ inputs.expected_live }}
+        run: |
+          node <<'NODE'
+          'use strict';
+          const crypto=require('node:crypto'),zlib=require('node:zlib');
+          const P='kp4ara-license-academy',ROOT='https://firebasehosting.googleapis.com/v1beta1/sites/'+P;
+          const HASH='74f8f3fc034862bfb26c75aa0de74df4657925f15b27a5e80145a75341704f16';
+          const sha=x=>crypto.createHash('sha256').update(x).digest('hex');
+          const canonical=x=>Array.isArray(x)?x.map(canonical):x&&typeof x==='object'?Object.fromEntries(Object.keys(x).sort().map(k=>[k,canonical(x[k])])):x;
+          const equal=(a,b)=>JSON.stringify(canonical(a))===JSON.stringify(canonical(b));
+          (async()=>{const text=process.env.CANDIDATE;if(sha(text||'')!==HASH)throw Error('Unapproved candidate');const data=JSON.parse(Buffer.from(text,'base64'));if(data.base_version!=='5139c599db2114af'||Object.keys(data.before).length!==30||Object.keys(data.after).length!==31)throw Error('Invalid anchor');const changed=Object.keys(data.after).filter(p=>data.after[p]!==data.before[p]);if(changed.length!==4||!equal(changed.sort(),Object.keys(data.blobs).sort()))throw Error('Unexpected change set');const uploaded=new Map();for(const p of changed){if(!/^\/(?:index\.html|new-pr-hams\.json|assets\/index-(?:CElWdBuc\.js|CZbrVL9-\.css))$/.test(p))throw Error('Unexpected path');const b=Buffer.from(data.blobs[p],'base64');if(sha(b)!==data.after[p])throw Error('Blob hash differs');uploaded.set(sha(b),b);if(p==='/new-pr-hams.json'){const feed=JSON.parse(zlib.gunzipSync(b));if(feed.items.length!==38||feed.meta.source_through_date!=='2026-10-02'||feed.meta.stale!==false||feed.items.some(i=>!equal(Object.keys(i).sort(),['callsign','grant_date','license_class','name'])))throw Error('Feed changed');}}
+          const key=JSON.parse(process.env.FIREBASE_HOSTING_SERVICE_ACCOUNT_JSON||'null');if(key?.client_email!=='kp4ara-welcome-publisher@'+P+'.iam.gserviceaccount.com'||key.project_id!==P)throw Error('Wrong identity');const now=Math.floor(Date.now()/1000),b64=x=>Buffer.from(JSON.stringify(x)).toString('base64url'),unsigned=b64({alg:'RS256',typ:'JWT'})+'.'+b64({iss:key.client_email,scope:'https://www.googleapis.com/auth/firebase',aud:'https://oauth2.googleapis.com/token',iat:now,exp:now+600});const assertion=unsigned+'.'+crypto.sign('RSA-SHA256',Buffer.from(unsigned),key.private_key).toString('base64url');const oauth=await fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'urn:ietf:params:oauth:grant-type:jwt-bearer',assertion}),redirect:'error'});if(!oauth.ok)throw Error('OAuth HTTP '+oauth.status);const token=(await oauth.json()).access_token;if(!token)throw Error('Missing token');console.log('OAuth PASS; dedicated identity; no credential output');
+          const operations=[];async function request(method,url,body){const u=new URL(url);if(u.hostname!=='firebasehosting.googleapis.com'||!u.pathname.startsWith('/v1beta1/sites/'+P+'/'))throw Error('Endpoint guard');const r=await fetch(url,{method,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{}),redirect:'error',signal:AbortSignal.timeout(60000)});operations.push({method,path:u.pathname,status:r.status});if(!r.ok)throw Error(method+' '+u.pathname+' HTTP '+r.status);return r.json();}
+          async function snapshot(version){let files={},next;const v=await request('GET',ROOT+'/versions/'+version);do{const page=await request('GET',ROOT+'/versions/'+version+'/files?pageSize=1000'+(next?'&pageToken='+encodeURIComponent(next):''));for(const f of page.files||[])files[f.path]=f.hash;next=page.nextPageToken;}while(next);return {files,config:v.config||{},status:v.status};}
+          async function live(){const r=await request('GET',ROOT+'/releases?pageSize=1');return r.releases?.[0]?.version?.name?.split('/').pop();}
+          async function activate(version){await request('POST',ROOT+'/releases?versionName='+encodeURIComponent('sites/'+P+'/versions/'+version),{message:'Controlled Welcome initial publication; approved candidate only'});}
+          if(process.env.OPERATION==='rollback'){const current=await live();if(current!==process.env.EXPECTED_LIVE||current===data.base_version)throw Error('Rollback concurrency guard');await activate(data.base_version);if(await live()!==data.base_version)throw Error('Rollback live verification failed');const old=await snapshot(data.base_version);if(!equal(old.files,data.before)||!equal(old.config,data.config))throw Error('Rollback manifest failed');console.log('ROLLBACK PASS '+data.base_version);return;}
+          if(process.env.OPERATION!=='publish')throw Error('Invalid operation');if(await live()!==data.base_version)throw Error('Production changed');const baseline=await snapshot(data.base_version);if(!equal(baseline.files,data.before)||!equal(baseline.config,data.config))throw Error('Protected production changed');console.log('Read-only preconditions PASS');
+          const version=await request('POST',ROOT+'/versions',{config:data.config});const id=version.name.split('/').pop();console.log('Prepared version '+id);const populated=await request('POST',ROOT+'/versions/'+id+':populateFiles',{files:data.after});for(const h of populated.uploadRequiredHashes||[]){const blob=uploaded.get(h);if(!blob)throw Error('Unapproved upload requested');const url=new URL(populated.uploadUrl+'/'+h);if(url.protocol!=='https:'||url.hostname!=='upload-firebasehosting.googleapis.com'||!url.pathname.startsWith('/upload/sites/'+P+'/versions/'+id+'/files/'))throw Error('Upload guard');const r=await fetch(url,{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/octet-stream'},body:blob,redirect:'error',signal:AbortSignal.timeout(60000)});operations.push({method:'POST',path:url.pathname,status:r.status});if(!r.ok)throw Error('Upload HTTP '+r.status);}
+          await request('PATCH',ROOT+'/versions/'+id+'?updateMask=status',{status:'FINALIZED'});const prepared=await snapshot(id);if(!equal(prepared.files,data.after)||!equal(prepared.config,data.config)||prepared.status!=='FINALIZED')throw Error('Prepared manifest differs');if(await live()!==data.base_version)throw Error('Concurrent release; abort');let active=false;try{await activate(id);active=true;if(await live()!==id)throw Error('Wrong live version');const post=await snapshot(id);if(!equal(post.files,data.after)||!equal(post.config,data.config))throw Error('Live manifest differs');for(const p of changed){const r=await fetch('https://'+P+'.web.app'+p+'?welcome_verify='+id,{redirect:'error',signal:AbortSignal.timeout(60000)});if(!r.ok)throw Error('Public resource HTTP '+r.status);const bytes=Buffer.from(await r.arrayBuffer());if(!bytes.equals(zlib.gunzipSync(Buffer.from(data.blobs[p],'base64'))))throw Error('Public bytes differ');}console.log(JSON.stringify({result:'PASS',before:data.base_version,after:id,protected_unchanged:27,files:31,operations},null,2));}catch(e){if(active){if(await live()!==id)throw Error('Concurrent production change; cannot overwrite');await activate(data.base_version);if(await live()!==data.base_version)throw Error('Rollback failed');console.log('ROLLED BACK '+data.base_version);}throw e;}
+          })().catch(e=>{console.error(e.message);process.exitCode=1;});
+          NODE
